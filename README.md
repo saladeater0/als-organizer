@@ -1,6 +1,9 @@
 # als-organizer
 
-Tidies any Ableton Live Set (`.als`) in about a second. It names, colours and orders your tracks by role. It never touches the original: it saves `My Track (organized).als` next to it.
+Tidies any Ableton Live Set (`.als`) in about a second. It groups, names, colours and orders your tracks by role. It never touches the original: it saves `My Track (organized).als` next to it.
+
+- Loose drum tracks (kick, snare, hats, percs, cymbals, toms…) go into one **DRUMS BUS** group, and loose synth tracks into one **SYNTH BUS**. If the set already has a drum or synth group, they join that instead.
+- Each group, every track in it, and every clip (arrangement and session view) all get the same colour.
 
 ```
 DRUMS   red      kick, hat, clap, perc, 909, drum rack ...
@@ -29,9 +32,10 @@ Tip: type `python3 organize_als.py ` and then drag the .als from Finder into Ter
 | Option | What it does |
 |---|---|
 | `--dry-run` | Show the plan, save nothing |
+| `--no-group` | Don't make new groups |
+| `--no-color-clips` | Colour tracks but leave clip colours alone |
 | `--no-rename` / `--no-color` / `--no-reorder` | Skip that step |
 | `--prefix` | Also prefix names you typed yourself: `kick` → `DRUMS kick` |
-| `--color-clips` | Recolour clips to match their track |
 | `-v` | Show the clues behind each decision |
 
 ## How it decides
@@ -39,7 +43,10 @@ Tip: type `python3 organize_als.py ` and then drag the .als from Finder into Ter
 For each track it scores keywords found in the track name, clip names, sample file names and devices/plugins. Names count most and devices count least. A track with no clues inherits its group's role. For example, unnamed recordings inside a group called `MAIN SYNTH` become `SYNTH 1`, `SYNTH 2`. Anything left over is `MISC`.
 
 - **Renaming:** auto-named tracks (`3-Audio`, `Audio 2 [2026-08-19 110949]`) become `SYNTH 1` and so on. Names you typed are kept unless you use `--prefix`. Auto-named groups become e.g. `DRUMS BUS`.
-- **Order:** drums → bass → chords → synth → atmos → vox → fx → misc. Groups move as a block and their tracks are sorted inside them. Returns and master stay where they are.
+- **Grouping:** roles listed in `AUTO_GROUP_ROLES` (drums and synth by default) get one group each. It takes at least 2 loose tracks to make a new group (`MIN_TRACKS_TO_GROUP`), but a single track still joins an existing group. Grouped tracks are routed into the group. The new group track is copied from a group already in your set. Live 11 sets without one use a built-in template. Live 10/12 sets without any group: group two tracks in Live (Cmd+G), save, and run again.
+- **Colour:** a group's colour wins. Everything inside it, clips included, matches the group.
+- **Order:** drums → bass → chords → synth → atmos → vox → fx → misc. Inside a group: kick → snare → clap → hats → perc → cymbals → toms. Groups move as a block. Returns and master stay where they are.
+- **Safety check:** after saving, the script re-reads the file and checks track ids, automation ids, group membership and sends. If anything is off, it deletes the output and tells you.
 - **Empty tracks** (no clips, no devices) are listed so you can delete them. Nothing is deleted automatically.
 
 ## Make it yours

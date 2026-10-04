@@ -3,11 +3,13 @@
 organize_als.py — tidy any Ableton Live Set (.als).
 
 What it does (never touches the original file):
-  * works out each track's role (drums, bass, chords, synth, pad/atmos, vox, fx, misc)
+  * works out each track's role (drums, bass, chords, synth, atmos, vox, fx, misc)
     from its name, clip names, sample file names, devices and plugins
-  * renames auto-named tracks ("3-Audio", "Audio 2 [2026-08-19 110949]") to "SYNTH 1", "BASS 2" ...
-  * colours every track by role
-  * reorders tracks/groups: drums -> bass -> chords -> synth -> pad/atmos -> vox -> fx -> misc
+  * puts loose drum tracks into one DRUMS group and loose synth tracks into one SYNTH group
+    (joins an existing group of that kind if the set already has one)
+  * renames auto-named tracks ("3-Audio", "Audio 2 [2026-08-19 110949]") to "SYNTH 1", "DRUMS 2" ...
+  * colours each group, every track inside it, and every clip (arrangement + session) the same colour
+  * reorders: drums -> bass -> chords -> synth -> atmos -> vox -> fx -> misc
   * flags empty tracks
   * saves "<name> (organized).als" next to the original
 
@@ -21,11 +23,14 @@ Usage:
 """
 
 import argparse
+import base64
+import copy
 import gzip
 import os
 import re
 import sys
 import xml.etree.ElementTree as ET
+import zlib
 from collections import Counter
 
 # ---------------------------------------------------------------------------
@@ -36,26 +41,30 @@ from collections import Counter
 # ---------------------------------------------------------------------------
 ROLES = [
     ("DRUMS", 14, ["kick", "kik", "bd", "snare", "sd", "clap", "clp", "hat", "hats", "hh", "hihat",
-                   "oh", "ch", "perc", "percussion", "rim", "rimshot", "shaker", "shk", "ride",
-                   "cymbal", "tom", "toms", "conga", "bongo", "808", "909", "707", "drum", "drums",
-                   "beat", "break", "top", "tops", "groove", "tamb", "tambourine", "cowbell",
-                   "snap", "drumgroupdevice", "drumrack"]),
+                   "oh", "ch", "perc", "percs", "percussion", "rim", "rimshot", "shaker", "shk", "ride",
+                   "cymbal", "cymbals", "cym", "tom", "toms", "conga", "bongo", "808", "909", "707",
+                   "drum", "drums", "beat", "break", "top", "tops", "groove", "tamb", "tambourine",
+                   "cowbell", "snap", "crash", "drumgroupdevice", "drumrack"]),
     ("BASS",  15, ["bass", "sub", "subbass", "303", "reese", "low", "lows", "bassline"]),
     ("CHORDS", 17, ["chord", "chords", "stab", "stabs", "keys", "key", "piano", "rhodes", "organ",
                     "epiano", "dubchord", "harmony"]),
-    ("SYNTH", 19, ["synth", "lead", "arp", "pluck", "seq", "sequence", "bleep", "melody", "mel",
-                   "hook", "operator", "wavetable", "instrumentvector", "ultraanalog", "analog",
+    ("SYNTH", 19, ["synth", "synths", "lead", "arp", "pluck", "seq", "sequence", "bleep", "melody",
+                   "mel", "hook", "operator", "wavetable", "instrumentvector", "ultraanalog", "analog",
                    "drift", "meld", "diva", "serum", "vital", "pigments", "juno", "moog", "minimoog"]),
     ("ATMOS", 23, ["pad", "pads", "atmos", "atmosphere", "drone", "texture", "textures", "ambient",
                    "ambience", "field", "fieldrec", "noise", "rain", "vinyl", "crackle", "tape",
                    "foley", "room", "hiss", "wash", "space", "dub", "string", "strings"]),
     ("VOX",   25, ["vox", "vocal", "vocals", "voice", "spoken", "acapella", "acappella", "chant",
-                   "speech", "sample_vox"]),
-    ("FX",    26, ["fx", "sfx", "riser", "sweep", "impact", "downlifter", "uplifter", "crash",
+                   "speech"]),
+    ("FX",    26, ["fx", "sfx", "riser", "sweep", "impact", "downlifter", "uplifter",
                    "reverse", "rev", "whoosh", "transition", "fill", "boom", "hit", "zap"]),
 ]
 MISC = ("MISC", 27)        # anything with no clues
-GROUP_SUFFIX = " BUS"     # auto-named groups become e.g. "DRUMS BUS"
+
+# Loose tracks of these roles get put into one group per role.
+AUTO_GROUP_ROLES = ["DRUMS", "SYNTH"]
+MIN_TRACKS_TO_GROUP = 2   # don't make a group for a single track
+GROUP_SUFFIX = " BUS"     # new / auto-named groups become e.g. "DRUMS BUS"
 
 # Names Live gives tracks automatically — these get replaced.
 GENERIC = re.compile(r"^(audio|midi|group|track|\d+)( \d+)*$", re.I)
@@ -75,6 +84,31 @@ for _role, _col, _words in ROLES:
 
 TRACK_TAGS = ("AudioTrack", "MidiTrack", "GroupTrack")
 
+# An empty Live 11 group track, used only when a Live 11 set has no group of its own to copy.
+GROUP_TEMPLATE_LIVE11 = (
+    "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"
+    "CMI="
+)
+
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -82,6 +116,12 @@ TRACK_TAGS = ("AudioTrack", "MidiTrack", "GroupTrack")
 def val(el, path, default=""):
     x = el.find(path)
     return x.get("Value", default) if x is not None else default
+
+
+def setv(el, path, value):
+    x = el.find(path)
+    if x is not None:
+        x.set("Value", str(value))
 
 
 def tokens(text):
@@ -146,10 +186,17 @@ def sample_names(track):
     return sorted(names)
 
 
+def is_pointee(el):
+    """Elements whose Id comes from the set-wide NextPointeeId counter."""
+    t = el.tag
+    return el.get("Id") is not None and (t.endswith("Target") or t == "Pointee"
+                                         or t.startswith("ControllerTargets"))
+
+
 # ---------------------------------------------------------------------------
 # classification
 # ---------------------------------------------------------------------------
-def score(track, include_name=True):
+def score(track):
     s = Counter()
     clues = []
 
@@ -160,9 +207,8 @@ def score(track, include_name=True):
                 s[role] += weight
                 clues.append("%s '%s'" % (where, t))
 
-    if include_name:
-        user = val(track, "Name/UserName")
-        add(user or clean_auto_name(val(track, "Name/EffectiveName")), WEIGHT_NAME, "name")
+    user = val(track, "Name/UserName")
+    add(user or clean_auto_name(val(track, "Name/EffectiveName")), WEIGHT_NAME, "name")
     for c in clips(track):
         add(val(c, "Name"), WEIGHT_CLIP, "clip")
     for n in sample_names(track):
@@ -198,6 +244,96 @@ def get_color(el):
 
 
 # ---------------------------------------------------------------------------
+# creating a group track
+# ---------------------------------------------------------------------------
+class Ids(object):
+    """Hands out fresh track Ids and pointee Ids so nothing in the set collides."""
+
+    def __init__(self, live_set):
+        self.live_set = live_set
+        track_ids = [int(t.get("Id")) for t in live_set.find("Tracks") if t.get("Id")]
+        self.next_track = max(track_ids + [0]) + 1
+        pointees = [int(e.get("Id")) for e in live_set.iter() if is_pointee(e)]
+        self.next_pointee = max([int(val(live_set, "NextPointeeId", "0"))] + [p + 1 for p in pointees])
+
+    def track(self):
+        self.next_track += 1
+        return str(self.next_track - 1)
+
+    def pointee(self):
+        self.next_pointee += 1
+        return str(self.next_pointee - 1)
+
+    def save(self):
+        setv(self.live_set, "NextPointeeId", self.next_pointee)
+
+
+def group_template(root, live_set):
+    """Copy of an existing group in this set, or the built-in Live 11 one."""
+    for t in live_set.find("Tracks"):
+        if t.tag == "GroupTrack":
+            return copy.deepcopy(t), "copied from a group in this set"
+    if root.get("MinorVersion", "").startswith("11."):
+        xml = zlib.decompress(base64.b64decode(GROUP_TEMPLATE_LIVE11))
+        return ET.fromstring(xml), "built-in Live 11 group"
+    return None, None
+
+
+def make_group(template, name, color, ids, n_returns):
+    g = copy.deepcopy(template)
+    g.set("Id", ids.track())
+    for e in g.iter():                                  # fresh automation/modulation ids
+        if is_pointee(e):
+            e.set("Id", ids.pointee())
+    setv(g, "Name/UserName", name)
+    setv(g, "Name/EffectiveName", name)
+    setv(g, "Name/Annotation", "")
+    set_color(g, color)
+    setv(g, "TrackGroupId", "-1")
+    setv(g, "TrackUnfolded", "true")
+    setv(g, "LinkedTrackGroupId", "-1")
+    for path in ("AutomationEnvelopes/Envelopes", "DeviceChain/DeviceChain/Devices"):
+        holder = g.find(path)
+        if holder is not None:
+            for child in list(holder):
+                holder.remove(child)
+    out = g.find("DeviceChain/AudioOutputRouting")
+    if out is not None:
+        setv(out, "Target", "AudioOut/Master")
+        setv(out, "UpperDisplayString", "Master")
+        setv(out, "LowerDisplayString", "")
+    mixer = g.find("DeviceChain/Mixer")
+    if mixer is not None:
+        setv(mixer, "Volume/Manual", "1")
+        setv(mixer, "Pan/Manual", "0")
+        setv(mixer, "Speaker/Manual", "true")
+        setv(mixer, "On/Manual", "true")
+        setv(mixer, "SoloSink", "false")
+        sends = mixer.find("Sends")
+        if sends is not None:
+            proto = list(sends)[0] if len(sends) else None
+            for child in list(sends):
+                sends.remove(child)
+            for i in range(n_returns if proto is not None else 0):
+                h = copy.deepcopy(proto)
+                h.set("Id", str(i))
+                for e in h.iter():
+                    if is_pointee(e):
+                        e.set("Id", ids.pointee())
+                setv(h, "Send/Manual", val(h, "Send/MidiControllerRange/Min", "0.0003162277571"))
+                sends.append(h)
+    return g
+
+
+def route_to_group(track):
+    out = track.find("DeviceChain/AudioOutputRouting")
+    if out is not None and val(out, "Target") == "AudioOut/Master":
+        setv(out, "Target", "AudioOut/GroupTrack")
+        setv(out, "UpperDisplayString", "Group")
+        setv(out, "LowerDisplayString", "")
+
+
+# ---------------------------------------------------------------------------
 # main work
 # ---------------------------------------------------------------------------
 def organize(path, args):
@@ -210,12 +346,12 @@ def organize(path, args):
 
     all_tracks = [t for t in tracks_el if t.tag in TRACK_TAGS]
     others = [t for t in tracks_el if t.tag not in TRACK_TAGS]      # Return tracks etc.
+    n_returns = len([t for t in others if t.tag == "ReturnTrack"])
     by_id = dict((t.get("Id"), t) for t in all_tracks)
     parent = dict((t.get("Id"), val(t, "TrackGroupId", "-1")) for t in all_tracks)
-    children = dict((t.get("Id"), []) for t in all_tracks)
-    children["-1"] = []
-    for t in all_tracks:                                             # keeps original order
-        children.setdefault(parent[t.get("Id")], []).append(t)
+
+    def kids(pid):
+        return [t for t in all_tracks if parent[t.get("Id")] == pid]
 
     role, why, empty = {}, {}, []
 
@@ -224,8 +360,7 @@ def organize(path, args):
         if t.tag == "GroupTrack":
             continue
         s, clues = score(t)
-        r = pick(s)
-        role[t.get("Id")] = r
+        role[t.get("Id")] = pick(s)
         why[t.get("Id")] = clues
         if not clips(t) and not device_names(t):
             empty.append(t)
@@ -236,14 +371,13 @@ def organize(path, args):
         if gid in role:
             return role[gid]
         own = Counter()
-        user = val(g, "Name/UserName")
-        for tk in tokens(user):
+        for tk in tokens(val(g, "Name/UserName")):
             if tk in KEYWORDS:
                 own[KEYWORDS[tk]] += 1
         r = pick(own)
         if r is None:
             votes = Counter()
-            for c in children.get(gid, []):
+            for c in kids(gid):
                 cr = group_role(c) if c.tag == "GroupTrack" else role.get(c.get("Id"))
                 if cr:
                     votes[cr] += 1
@@ -265,16 +399,59 @@ def organize(path, args):
             if p != "-1":
                 role[tid] = role[p]
                 why[tid] = ["inherited from group '%s'" % display_name(by_id[p])]
-        if role.get(tid) is None:
-            role[tid] = MISC[0]
-            why.setdefault(tid, [])
-    for t in all_tracks:   # groups whose members were all clueless
-        if role[t.get("Id")] is None:
+    for t in all_tracks:
+        if role.get(t.get("Id")) is None:
             role[t.get("Id")] = MISC[0]
+            why.setdefault(t.get("Id"), [])
 
-    # 4. rename + colour
+    # 4. put loose drum / synth tracks into one group per role
+    ids = Ids(live_set)
+    grouped_note = []
+    template, template_src = None, None
+    if not args.no_group:
+        for r in AUTO_GROUP_ROLES:
+            loose = [t for t in all_tracks if t.tag != "GroupTrack"
+                     and parent[t.get("Id")] == "-1" and role[t.get("Id")] == r]
+            existing = [g for g in all_tracks if g.tag == "GroupTrack"
+                        and parent[g.get("Id")] == "-1" and role[g.get("Id")] == r]
+            if not loose or (not existing and len(loose) < MIN_TRACKS_TO_GROUP):
+                continue
+            if existing:
+                g = existing[0]
+                grouped_note.append("%d loose %s track(s) moved into existing group '%s'"
+                                    % (len(loose), r.lower(), display_name(g)))
+            else:
+                if template is None:
+                    template, template_src = group_template(root, live_set)
+                if template is None:
+                    grouped_note.append("couldn't make a %s group: this set has no group to copy. "
+                                        "Group any two tracks in Live (Cmd+G), save, and run again." % r)
+                    continue
+                g = make_group(template, r + GROUP_SUFFIX, ROLE_COLOR[r], ids, n_returns)
+                all_tracks.insert(all_tracks.index(loose[0]), g)
+                gid = g.get("Id")
+                by_id[gid] = g
+                parent[gid] = "-1"
+                role[gid] = r
+                grouped_note.append("new group '%s' made for %d %s track(s) (%s)"
+                                    % (r + GROUP_SUFFIX, len(loose), r.lower(), template_src))
+            for t in loose:
+                setv(t, "TrackGroupId", g.get("Id"))
+                parent[t.get("Id")] = g.get("Id")
+                route_to_group(t)
+    ids.save()
+
+    def top_group(tid):
+        top = None
+        p = parent[tid]
+        while p != "-1":
+            top = p
+            p = parent.get(p, "-1")
+        return top
+
+    # 5. rename + colour (everything in a group takes the group's colour, clips included)
     counters = Counter()
-    changes = []
+    changes = {}
     used_names = set()
     for t in all_tracks:
         tid = t.get("Id")
@@ -295,7 +472,6 @@ def organize(path, args):
                     new = "%s %s" % (r, base) if args.prefix else base
             elif args.prefix and not user.upper().startswith(r):
                 new = "%s %s" % (r, user)
-            # avoid duplicates like two "SYNTH BUS"
             candidate, n = new, 2
             while candidate.upper() in used_names and candidate != old:
                 candidate = "%s %d" % (new, n)
@@ -303,23 +479,37 @@ def organize(path, args):
             new = candidate
             used_names.add(new.upper())
             if new != old:
-                t.find("Name/UserName").set("Value", new)
-                t.find("Name/EffectiveName").set("Value", new)
+                setv(t, "Name/UserName", new)
+                setv(t, "Name/EffectiveName", new)
         old_col = get_color(t)
+        top = top_group(tid)
+        colour = ROLE_COLOR[role[top]] if top else ROLE_COLOR[r]
         if not args.no_color:
-            set_color(t, ROLE_COLOR[r])
-            if args.color_clips:
+            set_color(t, colour)
+            if not args.no_color_clips:
                 for c in clips(t):
-                    set_color(c, ROLE_COLOR[r])
-        changes.append((t, r, old, new, old_col, get_color(t)))
+                    set_color(c, colour)
+        changes[tid] = (r, old, new, old_col, get_color(t), len(clips(t)))
 
-    # 5. reorder: sort siblings by role, keep groups' members right after them
+    # 6. reorder: sort siblings by role (and kick -> snare -> hats ... inside a role),
+    #    keeping groups' members right after them
     order = []
+    role_words = dict((r[0], r[2]) for r in ROLES)
+
+    def sort_key(t):
+        r = role[t.get("Id")]
+        words = role_words.get(r, [])
+        sub = len(words)
+        if t.tag != "GroupTrack":
+            for tk in tokens(display_name(t)):
+                if tk in words:
+                    sub = min(sub, words.index(tk))
+        return (ROLE_ORDER.index(r), sub)
 
     def emit(pid):
-        sibs = children.get(pid, [])
+        sibs = kids(pid)
         if not args.no_reorder:
-            sibs = sorted(sibs, key=lambda x: ROLE_ORDER.index(role[x.get("Id")]))  # stable
+            sibs = sorted(sibs, key=sort_key)  # stable
         for s in sibs:
             order.append(s)
             if s.tag == "GroupTrack":
@@ -336,16 +526,23 @@ def organize(path, args):
     print("\n%s  (%s)" % (os.path.basename(path), creator))
     print("-" * 78)
     depth = {}
+    n_clips = 0
     for t in order:
-        p = parent[t.get("Id")]
-        depth[t.get("Id")] = 0 if p == "-1" else depth.get(p, 0) + 1
-        c = [x for x in changes if x[0] is t][0]
-        indent = "   " * depth[t.get("Id")]
+        tid = t.get("Id")
+        p = parent[tid]
+        depth[tid] = 0 if p == "-1" else depth.get(p, 0) + 1
+        r, old, new, _, _, nc = changes[tid]
+        n_clips += nc
+        indent = "   " * depth[tid]
         kind = "[group] " if t.tag == "GroupTrack" else ""
-        arrow = ("%-26s -> %s" % (c[2][:26], c[3])) if c[2] != c[3] else c[3]
-        print("%s%s%-7s %s" % (indent, kind, c[1], arrow))
-        if args.verbose and why.get(t.get("Id")):
-            print("%s        clues: %s" % (indent, ", ".join(why[t.get("Id")][:6])))
+        arrow = ("%-26s -> %s" % (old[:26], new)) if old != new else new
+        print("%s%s%-7s %s" % (indent, kind, r, arrow))
+        if args.verbose and why.get(tid):
+            print("%s        clues: %s" % (indent, ", ".join(why[tid][:6])))
+    for note in grouped_note:
+        print("\n* " + note)
+    if not args.no_color and not args.no_color_clips:
+        print("* %d clip(s) recoloured to match their track/group" % n_clips)
     if empty:
         print("\nEmpty tracks (no clips, no devices) — maybe delete in Live:")
         for t in empty:
@@ -364,25 +561,60 @@ def organize(path, args):
     data = ('<?xml version="1.0" encoding="UTF-8"?>\n' + body + "\n").encode("utf-8")
     with gzip.open(out, "wb") as f:
         f.write(data)
-    # sanity check: re-read what we wrote
-    with gzip.open(out, "rb") as f:
-        check = ET.fromstring(f.read())
-    n_after = len([t for t in check.find("LiveSet/Tracks") if t.tag in TRACK_TAGS])
-    assert n_after == len(all_tracks), "track count changed — output is suspect"
+    problems = check(out)
+    if problems:
+        os.remove(out)
+        raise RuntimeError("output failed safety checks, nothing saved:\n  " + "\n  ".join(problems))
     print("\nSaved: %s" % out)
     return out
 
 
+def check(path):
+    """Re-read the saved set and make sure its structure is consistent."""
+    with gzip.open(path, "rb") as f:
+        ls = ET.fromstring(f.read()).find("LiveSet")
+    problems = []
+    tracks = list(ls.find("Tracks"))
+    tids = [t.get("Id") for t in tracks]
+    if len(tids) != len(set(tids)):
+        problems.append("duplicate track ids")
+    pids = [e.get("Id") for e in ls.iter() if is_pointee(e)]
+    if len(pids) != len(set(pids)):
+        problems.append("duplicate automation ids")
+    if pids and max(int(p) for p in pids) >= int(val(ls, "NextPointeeId", "0")):
+        problems.append("NextPointeeId too low")
+    groups = set(t.get("Id") for t in tracks if t.tag == "GroupTrack")
+    n_returns = len([t for t in tracks if t.tag == "ReturnTrack"])
+    open_groups = []                       # groups whose members we're currently inside
+    for t in tracks:
+        if t.tag == "ReturnTrack":
+            continue
+        g = val(t, "TrackGroupId", "-1")
+        if g != "-1" and g not in groups:
+            problems.append("'%s' points at a missing group" % display_name(t))
+        while open_groups and open_groups[-1] != g:
+            open_groups.pop()
+        if g != "-1" and not open_groups:
+            problems.append("'%s' is not directly under its group" % display_name(t))
+        if t.tag == "GroupTrack":
+            open_groups.append(t.get("Id"))
+        sends = t.find("DeviceChain/Mixer/Sends")
+        if sends is not None and len(sends) != n_returns:
+            problems.append("'%s' has %d sends for %d returns" % (display_name(t), len(sends), n_returns))
+    return problems
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Organize Ableton Live Sets: name, colour and order tracks by role.")
+    ap = argparse.ArgumentParser(description="Organize Ableton Live Sets: group, name, colour and order tracks by role.")
     ap.add_argument("files", nargs="+", help=".als file(s)")
     ap.add_argument("--dry-run", action="store_true", help="show the plan, don't save")
+    ap.add_argument("--no-group", action="store_true", help="don't make new groups")
     ap.add_argument("--no-rename", action="store_true", help="leave track names alone")
-    ap.add_argument("--no-color", action="store_true", help="leave colours alone")
+    ap.add_argument("--no-color", action="store_true", help="leave all colours alone")
+    ap.add_argument("--no-color-clips", action="store_true", help="colour tracks but leave clip colours alone")
     ap.add_argument("--no-reorder", action="store_true", help="leave track order alone")
     ap.add_argument("--prefix", action="store_true",
                     help="also prefix names you typed yourself, e.g. 'kick' -> 'DRUMS kick'")
-    ap.add_argument("--color-clips", action="store_true", help="recolour clips to match their track")
     ap.add_argument("-v", "--verbose", action="store_true", help="show why each track got its role")
     args = ap.parse_args()
 
