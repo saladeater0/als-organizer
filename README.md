@@ -40,7 +40,7 @@ Tip: type `python3 organize_als.py ` and then drag the .als from Finder into Ter
 
 ## How it decides
 
-For each track it scores keywords found in the track name, clip names, sample file names and devices/plugins. Names count most and devices count least. A track with no clues inherits its group's role. For example, unnamed recordings inside a group called `MAIN SYNTH` become `SYNTH 1`, `SYNTH 2`. Anything left over is `MISC`.
+If a track's own name says what it is (`SUB`, `OPEN HATS`), that decides. Otherwise it scores keywords in clip names, sample file names and devices/plugins. A track with no clues inherits its group's role. For example, unnamed recordings inside a group called `MAIN SYNTH` become `SYNTH 1`, `SYNTH 2`. Anything left over is `MISC`.
 
 - **Renaming:** auto-named tracks (`3-Audio`, `Audio 2 [2026-08-19 110949]`) become `SYNTH 1` and so on. Names you typed are kept unless you use `--prefix`. Auto-named groups become e.g. `DRUMS BUS`.
 - **Grouping:** roles listed in `AUTO_GROUP_ROLES` (drums and synth by default) get one group each. It takes at least 2 loose tracks to make a new group (`MIN_TRACKS_TO_GROUP`), but a single track still joins an existing group. Grouped tracks are routed into the group. The new group track is copied from a group already in your set. Live 11 sets without one use a built-in template. Live 10/12 sets without any group: group two tracks in Live (Cmd+G), save, and run again.
@@ -48,6 +48,35 @@ For each track it scores keywords found in the track name, clip names, sample fi
 - **Order:** drums → bass → chords → synth → atmos → vox → fx → misc. Inside a group: kick → snare → clap → hats → perc → cymbals → toms. Groups move as a block. Returns and master stay where they are.
 - **Safety check:** after saving, the script re-reads the file and checks track ids, automation ids, group membership and sends. If anything is off, it deletes the output and tells you.
 - **Empty tracks** (no clips, no devices) are listed so you can delete them. Nothing is deleted automatically.
+
+## Cleanup EQ (`eq_als.py`)
+
+A separate script that adds one **EQ Eight named "AUTO EQ"** to each track. It's a starting point that cuts the low end each sound doesn't need so the kick and bass sit cleanly. It isn't a mix.
+
+```
+python3 eq_als.py "My Track.als"                 # saves "My Track (eq).als"
+python3 eq_als.py "My Track.als" --dry-run       # preview
+python3 organize_als.py "My Track.als" --eq      # organize + EQ in one file
+```
+
+| Sound | Low cut |
+|---|---|
+| Kick, bass, sub | 30 Hz (rumble only) |
+| Hats, cymbals, crash, shaker | 350 Hz |
+| Snare, clap, rim | 150 Hz |
+| Perc, toms | 150 Hz |
+| Chords / stabs | 150 Hz |
+| Synths | 120 Hz |
+| Pads / atmos | 200 Hz + high cut 12 kHz |
+| Vox | 100 Hz |
+| FX | 200 Hz |
+
+- Gentle 12 dB/octave slopes. Every value is a normal EQ Eight band you can change or switch off.
+- **Your own EQ always wins:** tracks that already have EQ Eight, EQ Three, Channel EQ, Pro-Q or any plugin with "EQ" in its name are skipped.
+- Groups, returns, master, empty tracks and tracks it can't identify (MISC) are skipped.
+- Audio tracks get the EQ first in the chain. MIDI tracks get it right after the instrument.
+- The EQ device is copied from one already in your set. Live 11 sets without one use a built-in copy. Live 10/12 sets without one: drop an EQ Eight on any track, save, and run again.
+- Edit `SOUND_RULES` / `ROLE_RULES` at the top of `eq_als.py` to change the frequencies.
 
 ## Make it yours
 

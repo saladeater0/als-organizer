@@ -209,8 +209,10 @@ def score(track):
 
     user = val(track, "Name/UserName")
     add(user or clean_auto_name(val(track, "Name/EffectiveName")), WEIGHT_NAME, "name")
-    for c in clips(track):
-        add(val(c, "Name"), WEIGHT_CLIP, "clip")
+    if s:                       # the track's own name says what it is — that wins
+        return s, clues
+    for n in sorted(set(val(c, "Name") for c in clips(track))):   # each clip name once
+        add(n, WEIGHT_CLIP, "clip")
     for n in sample_names(track):
         add(n, WEIGHT_SAMPLE, "sample")
     for d in device_names(track):
@@ -225,6 +227,68 @@ def pick(counter):
     for role in ROLE_ORDER:          # tie-break by role order
         if counter.get(role) == best:
             return role
+
+
+def classify(all_tracks):
+    """Work out each track's role. Returns (role, why, empty) keyed by track Id."""
+    by_id = dict((t.get("Id"), t) for t in all_tracks)
+    parent = dict((t.get("Id"), val(t, "TrackGroupId", "-1")) for t in all_tracks)
+
+    def kids(pid):
+        return [t for t in all_tracks if parent[t.get("Id")] == pid]
+
+    role, why, empty = {}, {}, []
+
+    # 1. classify non-group tracks from their own clues
+    for t in all_tracks:
+        if t.tag == "GroupTrack":
+            continue
+        s, clues = score(t)
+        role[t.get("Id")] = pick(s)
+        why[t.get("Id")] = clues
+        if not clips(t) and not device_names(t):
+            empty.append(t)
+
+    # 2. groups: own name first, else majority of members
+    def group_role(g):
+        gid = g.get("Id")
+        if gid in role:
+            return role[gid]
+        own = Counter()
+        for tk in tokens(val(g, "Name/UserName")):
+            if tk in KEYWORDS:
+                own[KEYWORDS[tk]] += 1
+        r = pick(own)
+        if r is None:
+            votes = Counter()
+            for c in kids(gid):
+                cr = group_role(c) if c.tag == "GroupTrack" else role.get(c.get("Id"))
+                if cr:
+                    votes[cr] += 1
+            r = pick(votes)
+        role[gid] = r
+        return r
+
+    for t in all_tracks:
+        if t.tag == "GroupTrack":
+            group_role(t)
+
+    # 3. tracks with no clues inherit their group's role
+    for t in all_tracks:
+        tid = t.get("Id")
+        if role.get(tid) is None:
+            p = parent[tid]
+            while p != "-1" and role.get(p) in (None, MISC[0]):
+                p = parent.get(p, "-1")
+            if p != "-1":
+                role[tid] = role[p]
+                why[tid] = ["inherited from group '%s'" % display_name(by_id[p])]
+    for t in all_tracks:
+        if role.get(t.get("Id")) is None:
+            role[t.get("Id")] = MISC[0]
+            why.setdefault(t.get("Id"), [])
+
+    return role, why, empty
 
 
 # ---------------------------------------------------------------------------
@@ -353,56 +417,7 @@ def organize(path, args):
     def kids(pid):
         return [t for t in all_tracks if parent[t.get("Id")] == pid]
 
-    role, why, empty = {}, {}, []
-
-    # 1. classify non-group tracks from their own clues
-    for t in all_tracks:
-        if t.tag == "GroupTrack":
-            continue
-        s, clues = score(t)
-        role[t.get("Id")] = pick(s)
-        why[t.get("Id")] = clues
-        if not clips(t) and not device_names(t):
-            empty.append(t)
-
-    # 2. groups: own name first, else majority of members
-    def group_role(g):
-        gid = g.get("Id")
-        if gid in role:
-            return role[gid]
-        own = Counter()
-        for tk in tokens(val(g, "Name/UserName")):
-            if tk in KEYWORDS:
-                own[KEYWORDS[tk]] += 1
-        r = pick(own)
-        if r is None:
-            votes = Counter()
-            for c in kids(gid):
-                cr = group_role(c) if c.tag == "GroupTrack" else role.get(c.get("Id"))
-                if cr:
-                    votes[cr] += 1
-            r = pick(votes)
-        role[gid] = r
-        return r
-
-    for t in all_tracks:
-        if t.tag == "GroupTrack":
-            group_role(t)
-
-    # 3. tracks with no clues inherit their group's role
-    for t in all_tracks:
-        tid = t.get("Id")
-        if role.get(tid) is None:
-            p = parent[tid]
-            while p != "-1" and role.get(p) in (None, MISC[0]):
-                p = parent.get(p, "-1")
-            if p != "-1":
-                role[tid] = role[p]
-                why[tid] = ["inherited from group '%s'" % display_name(by_id[p])]
-    for t in all_tracks:
-        if role.get(t.get("Id")) is None:
-            role[t.get("Id")] = MISC[0]
-            why.setdefault(t.get("Id"), [])
+    role, why, empty = classify(all_tracks)
 
     # 4. put loose drum / synth tracks into one group per role
     ids = Ids(live_set)
@@ -522,6 +537,12 @@ def organize(path, args):
     for t in order + others:
         tracks_el.append(t)
 
+    eq_notes = []
+    if args.eq:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import eq_als
+        eq_notes = eq_als.apply_eq(root, role)
+
     # report
     print("\n%s  (%s)" % (os.path.basename(path), creator))
     print("-" * 78)
@@ -543,6 +564,10 @@ def organize(path, args):
         print("\n* " + note)
     if not args.no_color and not args.no_color_clips:
         print("* %d clip(s) recoloured to match their track/group" % n_clips)
+    if eq_notes:
+        print("\nCleanup EQ:")
+        for note in eq_notes:
+            print("   " + note)
     if empty:
         print("\nEmpty tracks (no clips, no devices) — maybe delete in Live:")
         for t in empty:
@@ -615,6 +640,8 @@ def main():
     ap.add_argument("--no-reorder", action="store_true", help="leave track order alone")
     ap.add_argument("--prefix", action="store_true",
                     help="also prefix names you typed yourself, e.g. 'kick' -> 'DRUMS kick'")
+    ap.add_argument("--eq", action="store_true",
+                    help="also add a cleanup EQ Eight (low cuts by role) — see eq_als.py")
     ap.add_argument("-v", "--verbose", action="store_true", help="show why each track got its role")
     args = ap.parse_args()
 
