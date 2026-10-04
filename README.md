@@ -36,6 +36,9 @@ Tip: type `python3 organize_als.py ` and then drag the .als from Finder into Ter
 | `--no-color-clips` | Colour tracks but leave clip colours alone |
 | `--no-rename` / `--no-color` / `--no-reorder` | Skip that step |
 | `--prefix` | Also prefix names you typed yourself: `kick` → `DRUMS kick` |
+| `--listen` | Listen to the samples to tell what each track is (see below) |
+| `--samples DIR` | With `--listen`: another folder to look in for samples that moved |
+| `--track-colors` | Colour each track by its own role, even inside a group of another role |
 | `-v` | Show the clues behind each decision |
 
 ## How it decides
@@ -48,6 +51,39 @@ If a track's own name says what it is (`SUB`, `OPEN HATS`), that decides. Otherw
 - **Order:** drums → bass → chords → synth → atmos → vox → fx → misc. Inside a group: kick → snare → clap → hats → perc → cymbals → toms. Groups move as a block. Returns and master stay where they are.
 - **Safety check:** after saving, the script re-reads the file and checks track ids, automation ids, group membership and sends. If anything is off, it deletes the output and tells you.
 - **Empty tracks** (no clips, no devices) are listed so you can delete them. Nothing is deleted automatically.
+
+## Listen to the audio (`--listen`)
+
+Names lie: a track called `CLOSED HAT` can be playing an open-hat loop, and `20-Audio` says nothing at all. With `--listen` the organizer opens the actual sample files and works out what each track sounds like.
+
+```
+python3 organize_als.py "My Track.als" --listen                     # organize by sound
+python3 organize_als.py "My Track.als" --listen --track-colors -v   # colour every track by its own role, show what it heard
+python3 listen_als.py "My Track.als"                                # just the listening report, nothing saved
+python3 listen_als.py kick.wav "pad loop.aif" -v                    # single samples, with the measurements
+```
+
+It measures where the energy sits (sub, bass, mids, highs), how noisy or tonal the sound is, how many notes ring at once, how often it hits, how fast each hit dies away, whether the pitch drops inside a hit (kick) or holds (bass), and whether it swells up (riser). That gives one of these labels:
+
+| Role | Labels |
+|---|---|
+| DRUMS | kick, closed hats, open hats, crash, clap/snare, perc, drum loop, drum kit |
+| BASS | sub, bass |
+| CHORDS | chords, stabs |
+| SYNTH | lead, arp |
+| ATMOS | pad, drone, noise |
+| FX | riser, reverse cymbal |
+
+- **Your typed name still wins.** When the audio disagrees with it, you get a "Check these" list instead (e.g. `'CLOSED HAT' sounds like open hats`, `'PRE CRASH' ... sounds like reverse cymbal (FX)`).
+- For tracks without a typed name, the sound is the strongest clue. Auto-named tracks are renamed after what they sound like: `20-Audio` → `RISER`.
+- **Plugin synths** (Diva, Serum, Pigments…) make their sound inside Live, so there's no file to hear. Those are judged from their MIDI notes (how low, how many at once, how long, how busy), marked "notes only" and counted for less.
+- Samples are found at their saved path, then relative to the set, then by file name anywhere in the project folder. If you moved your sample library, point at it with `--samples ~/Splice` (repeatable).
+- Reads WAV (16/24/32-bit, float) and AIFF/AIFC. Long recordings: only the first 90 s are analysed. Still standard library only — no installs.
+- All thresholds (`ONE_SHOT_SECONDS`, `OPEN_HAT_DECAY_MS`, `KICK_GLIDE`, `MIDI_BASS_KEY` …) are at the top of `listen_als.py` if your sounds land in the wrong bucket.
+
+`--track-colors` works with or without `--listen`: by default a group's colour wins, so a sub inside a DRUMS group turns red. With `--track-colors` every track (and its clips) wears its own role's colour, and the groups keep theirs.
+
+Tests: `python3 -m unittest discover tests` (synthesizes its own kicks, hats, pads, risers …).
 
 ## Cleanup EQ (`eq_als.py`)
 
