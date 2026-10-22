@@ -19,6 +19,7 @@ Usage:
   python3 organize_als.py "My Track.als"            # organize
   python3 organize_als.py "My Track.als" --dry-run  # just show what it would do
   python3 organize_als.py *.als                     # several sets at once
+  python3 organize_als.py "My Track.als" --listen   # also listen to the audio (listen_als.py)
   python3 organize_als.py --help                    # all options
 """
 
@@ -74,6 +75,8 @@ WEIGHT_NAME = 4      # track name
 WEIGHT_CLIP = 3      # clip names
 WEIGHT_SAMPLE = 2    # sample file names
 WEIGHT_DEVICE = 1    # instruments / effects / plugins
+WEIGHT_AUDIO = 6     # --listen: what the audio sounds like (beats everything but a typed name)
+WEIGHT_NOTES = 2     # --listen: plugin synths, judged from their MIDI notes only
 
 ROLE_ORDER = [r[0] for r in ROLES] + [MISC[0]]
 ROLE_COLOR = dict([(r[0], r[1]) for r in ROLES] + [MISC])
@@ -196,7 +199,8 @@ def is_pointee(el):
 # ---------------------------------------------------------------------------
 # classification
 # ---------------------------------------------------------------------------
-def score(track):
+def score(track, heard=None):
+    """heard: what listen_als.py made of this track's audio (or its MIDI notes), if anything."""
     s = Counter()
     clues = []
 
@@ -211,6 +215,10 @@ def score(track):
     add(user or clean_auto_name(val(track, "Name/EffectiveName")), WEIGHT_NAME, "name")
     if s:                       # the track's own name says what it is — that wins
         return s, clues
+    if heard:
+        audio = heard["source"] == "audio"
+        s[heard["role"]] += WEIGHT_AUDIO if audio else WEIGHT_NOTES
+        clues.append("%s '%s'" % ("audio" if audio else "notes", heard["label"]))
     for n in sorted(set(val(c, "Name") for c in clips(track))):   # each clip name once
         add(n, WEIGHT_CLIP, "clip")
     for n in sample_names(track):
@@ -229,8 +237,10 @@ def pick(counter):
             return role
 
 
-def classify(all_tracks):
-    """Work out each track's role. Returns (role, why, empty) keyed by track Id."""
+def classify(all_tracks, heard=None):
+    """Work out each track's role. Returns (role, why, empty) keyed by track Id.
+    heard: optional {track Id: verdict} from listen_als.py."""
+    heard = heard or {}
     by_id = dict((t.get("Id"), t) for t in all_tracks)
     parent = dict((t.get("Id"), val(t, "TrackGroupId", "-1")) for t in all_tracks)
 
@@ -243,7 +253,7 @@ def classify(all_tracks):
     for t in all_tracks:
         if t.tag == "GroupTrack":
             continue
-        s, clues = score(t)
+        s, clues = score(t, heard.get(t.get("Id")))
         role[t.get("Id")] = pick(s)
         why[t.get("Id")] = clues
         if not clips(t) and not device_names(t):
@@ -417,7 +427,31 @@ def organize(path, args):
     def kids(pid):
         return [t for t in all_tracks if parent[t.get("Id")] == pid]
 
-    role, why, empty = classify(all_tracks)
+    heard, listened = {}, {}
+    if args.listen:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import listen_als
+        print("\nListening to %s ..." % os.path.basename(path))
+        listened = listen_als.listen(root, path, args.samples,
+                                     progress=lambda n: print("   " + n[:70]))
+        heard = dict((tid, info["verdict"]) for tid, info in listened.items() if info["verdict"])
+
+    role, why, empty = classify(all_tracks, heard)
+
+    # where the audio disagrees with a name you typed (your name still wins — you decide)
+    checks = []
+    for t in all_tracks:
+        h = heard.get(t.get("Id"))
+        if not h or h["source"] != "audio" or h["conf"] == "low":
+            continue
+        name = display_name(t)
+        toks = tokens(name)
+        if role[t.get("Id")] != h["role"]:
+            checks.append("'%s' is %s by its name, but sounds like %s (%s)"
+                          % (name, role[t.get("Id")], h["label"], h["role"]))
+        elif ("closed" in toks and h["label"] == "open hats") or \
+                ("open" in toks and h["label"] == "closed hats"):
+            checks.append("'%s' sounds like %s" % (name, h["label"]))
 
     # 4. put loose drum / synth tracks into one group per role
     ids = Ids(live_set)
@@ -480,7 +514,10 @@ def organize(path, args):
                 if not user and GENERIC.match(base or "group"):
                     new = r + GROUP_SUFFIX
             elif not user:
-                if not base or GENERIC.match(base):
+                h = heard.get(tid)
+                if (not base or GENERIC.match(base)) and h and h["role"] == r:
+                    new = h["label"].upper()            # named after what it sounds like
+                elif not base or GENERIC.match(base):
                     counters[r] += 1
                     new = "%s %d" % (r, counters[r])
                 else:
@@ -498,7 +535,10 @@ def organize(path, args):
                 setv(t, "Name/EffectiveName", new)
         old_col = get_color(t)
         top = top_group(tid)
-        colour = ROLE_COLOR[role[top]] if top else ROLE_COLOR[r]
+        if top and not args.track_colors:
+            colour = ROLE_COLOR[role[top]]      # everything in a group wears the group's colour
+        else:
+            colour = ROLE_COLOR[r]              # each track wears its own role's colour
         if not args.no_color:
             set_color(t, colour)
             if not args.no_color_clips:
@@ -560,10 +600,33 @@ def organize(path, args):
         print("%s%s%-7s %s" % (indent, kind, r, arrow))
         if args.verbose and why.get(tid):
             print("%s        clues: %s" % (indent, ", ".join(why[tid][:6])))
+        h = heard.get(tid)
+        if args.verbose and h:
+            print("%s        heard: %s — %s" % (indent, h["label"], "; ".join(h["why"])))
     for note in grouped_note:
         print("\n* " + note)
     if not args.no_color and not args.no_color_clips:
         print("* %d clip(s) recoloured to match their track/group" % n_clips)
+    if args.listen:
+        n_audio = len([h for h in heard.values() if h["source"] == "audio"])
+        n_notes = len(heard) - n_audio
+        print("* listened to %d track(s); %d plugin-synth track(s) judged from MIDI notes only"
+              % (n_audio, n_notes))
+        missing = sorted(set(m for info in listened.values() for m in info["missing"]))
+        broken = sorted(set("%s (%s)" % (f, e) for info in listened.values()
+                            for f, _, e, _ in info["files"] if e))
+        if checks:
+            print("\nCheck these — the audio disagrees with the name (the name was kept):")
+            for c in checks:
+                print("   - " + c)
+        if missing:
+            print("\nSamples not found, so not heard (try --samples <folder>):")
+            for m in missing:
+                print("   - " + m)
+        if broken:
+            print("\nCouldn't read:")
+            for b in broken:
+                print("   - " + b)
     if eq_notes:
         print("\nCleanup EQ:")
         for note in eq_notes:
@@ -640,6 +703,13 @@ def main():
     ap.add_argument("--no-reorder", action="store_true", help="leave track order alone")
     ap.add_argument("--prefix", action="store_true",
                     help="also prefix names you typed yourself, e.g. 'kick' -> 'DRUMS kick'")
+    ap.add_argument("--listen", action="store_true",
+                    help="listen to the samples (and read plugin synths' MIDI) to tell what each track is "
+                         "— see listen_als.py")
+    ap.add_argument("--samples", action="append", default=[], metavar="DIR",
+                    help="with --listen: extra folder to look in for samples that moved (can repeat)")
+    ap.add_argument("--track-colors", action="store_true",
+                    help="colour each track by its own role, even inside a group of another role")
     ap.add_argument("--eq", action="store_true",
                     help="also add a cleanup EQ Eight (low cuts by role) — see eq_als.py")
     ap.add_argument("-v", "--verbose", action="store_true", help="show why each track got its role")
